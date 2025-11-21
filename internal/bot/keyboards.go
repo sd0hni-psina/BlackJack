@@ -10,18 +10,27 @@ const (
 	CallbackHit       = "hit"
 	CallbackStand     = "stand"
 	CallbackDouble    = "double"
+	CallbackSplit     = "split"
 	CallbackPlayAgain = "play_again"
 	CallbackBalance   = "balance"
 )
 
-func GameKeyboard(canDouble bool) tgbotapi.InlineKeyboardMarkup {
+type GameKeyboardOptions struct {
+	CanDouble bool
+	CanSplit  bool
+}
+
+func GameKeyboard(opts GameKeyboardOptions) tgbotapi.InlineKeyboardMarkup {
 	row := []tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardButtonData("👊 Hit", CallbackHit),
 		tgbotapi.NewInlineKeyboardButtonData("✋ Stand", CallbackStand),
 	}
 
-	if canDouble {
+	if opts.CanDouble {
 		row = append(row, tgbotapi.NewInlineKeyboardButtonData("💰 Double", CallbackDouble))
+	}
+	if opts.CanSplit {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("✂️ Split", CallbackSplit))
 	}
 
 	return tgbotapi.NewInlineKeyboardMarkup(row)

@@ -61,26 +61,77 @@ func (h *Handler) savePlayer(p *player.Player) {
 
 // ============== ФОРМАТИРОВАНИЕ ==============
 
-func formatGameStatus(g *game.State, showDealerHand bool) string {
-	dealerDisplay := fmt.Sprintf("[%s, ?]", g.DealerCards[0])
-	if showDealerHand {
-		dealerDisplay = fmt.Sprintf("%v (%d)", g.DealerCards, g.DealerScore())
+func formatHandStatus(hand *game.Hand, index int, total int) string {
+	prefix := "🎴"
+	if total > 1 {
+		prefix = fmt.Sprintf("🎴 Рука %d:", index+1)
 	}
 
-	return fmt.Sprintf("🎴 Вы: %v (%d)\n🃏 Дилер: %s",
-		g.PlayerCards, g.PlayerScore(), dealerDisplay)
+	status := ""
+	if hand.IsBust {
+		status = " 💥"
+	} else if hand.IsStand {
+		status = " ✋"
+	}
+
+	return fmt.Sprintf("%s %v (%d)%s", prefix, hand.Cards, hand.Score(), status)
 }
 
-func formatGameEnd(g *game.State, p *player.Player, result string, winAmount int) string {
-	msg := fmt.Sprintf("🎴 Вы: %v (%d)\n🃏 Дилер: %v (%d)\n\n%s",
-		g.PlayerCards, g.PlayerScore(), g.DealerCards, g.DealerScore(), result)
+func (h *Handler) formatGameStatus(g *game.State, showDealer bool) string {
+	var sb strings.Builder
 
-	if winAmount > 0 {
-		msg += fmt.Sprintf("\n💰 Выигрыш: +%d", winAmount)
+	// Показываем все руки
+	for i, hand := range g.Hands {
+		if i == g.CurrentHand && !g.AllHandsComplete() {
+			sb.WriteString("👉 ") // Текущая рука
+		}
+		sb.WriteString(formatHandStatus(hand, i, len(g.Hands)))
+		sb.WriteString("\n")
 	}
-	msg += fmt.Sprintf("\n💵 Баланс: %d", p.Balance)
 
-	return msg
+	// Дилер
+	if showDealer {
+		sb.WriteString(fmt.Sprintf("🃏 Дилер: %v (%d)", g.DealerCards, g.DealerScore()))
+	} else {
+		sb.WriteString(fmt.Sprintf("🃏 Дилер: [%s, ?]", g.DealerCards[0]))
+	}
+
+	return sb.String()
+}
+
+func (h *Handler) formatGameEnd(g *game.State, p *player.Player, results []string, totalWin int) string {
+	var sb strings.Builder
+
+	// Руки игрока с результатами
+	for i, hand := range g.Hands {
+		sb.WriteString(formatHandStatus(hand, i, len(g.Hands)))
+		if i < len(results) {
+			sb.WriteString(" — ")
+			sb.WriteString(results[i])
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("🃏 Дилер: %v (%d)\n", g.DealerCards, g.DealerScore()))
+
+	if totalWin > 0 {
+		sb.WriteString(fmt.Sprintf("\n💰 Выигрыш: +%d", totalWin))
+	}
+	sb.WriteString(fmt.Sprintf("\n💵 Баланс: %d", p.Balance))
+
+	return sb.String()
+}
+
+func (h *Handler) getKeyboardOptions(g *game.State, p *player.Player) GameKeyboardOptions {
+	hand := g.Current()
+	if hand == nil {
+		return GameKeyboardOptions{}
+	}
+
+	return GameKeyboardOptions{
+		CanDouble: hand.CanDouble() && p.CanAfford(hand.Bet),
+		CanSplit:  hand.CanSplit() && p.CanAfford(hand.Bet) && len(g.Hands) < 4,
+	}
 }
 
 // ============== ОБРАБОТЧИКИ КОМАНД ==============
@@ -105,15 +156,14 @@ func (h *Handler) HandleStart(chatID int64) {
 func (h *Handler) HandleHelp(chatID int64) {
 	h.send(chatID,
 		"📖 Правила Blackjack:\n\n"+
-			"🎯 Цель: набрать 21 очко или больше дилера, не перебрав\n\n"+
-			"📊 Очки:\n"+
-			"• 2-10 — номинал\n"+
-			"• J, Q, K — 10\n"+
-			"• A — 11 или 1\n\n"+
+			"🎯 Цель: набрать 21 или больше дилера\n\n"+
+			"📊 Очки: 2-10 номинал, J/Q/K = 10, A = 11 или 1\n\n"+
 			"🎮 Действия:\n"+
 			"• Hit — взять карту\n"+
 			"• Stand — остановиться\n"+
-			"• Double — удвоить (только первый ход)\n\n"+
+			"• Double — удвоить ставку\n"+
+			"• Split — разделить пару\n\n"+
+			"✂️ Split: при двух одинаковых картах можно разделить на две руки. Каждая рука играет отдельно.\n\n"+
 			"🎰 Blackjack платит x2.5")
 }
 
@@ -192,8 +242,10 @@ func (h *Handler) HandlePlay(chatID int64, args []string) {
 	g := game.NewState(bet)
 	h.games.Set(chatID, g)
 
+	hand := g.Current()
+
 	// Проверка блэкджеков
-	playerBJ := game.IsBlackjack(g.PlayerCards)
+	playerBJ := hand.IsBlackjack()
 	dealerBJ := game.IsBlackjack(g.DealerCards)
 
 	if playerBJ || dealerBJ {
@@ -204,7 +256,7 @@ func (h *Handler) HandlePlay(chatID int64, args []string) {
 			h.savePlayer(p)
 			h.sendWithKeyboard(chatID,
 				fmt.Sprintf("🎴 Вы: %v — BLACKJACK!\n🃏 Дилер: %v — BLACKJACK!\n\n🤝 Ничья!\n💵 Баланс: %d",
-					g.PlayerCards, g.DealerCards, p.Balance),
+					hand.Cards, g.DealerCards, p.Balance),
 				EndGameKeyboard(p.LastBet))
 			return
 		}
@@ -215,28 +267,27 @@ func (h *Handler) HandlePlay(chatID int64, args []string) {
 			h.savePlayer(p)
 			h.sendWithKeyboard(chatID,
 				fmt.Sprintf("🎴 Вы: %v\n\n🎰 BLACKJACK! 🎰\n\n💰 +%d (x%.1f)\n💵 Баланс: %d",
-					g.PlayerCards, winAmount, h.cfg.BlackjackPays, p.Balance),
+					hand.Cards, winAmount, h.cfg.BlackjackPays, p.Balance),
 				EndGameKeyboard(p.LastBet))
 			return
 		}
 
-		// Дилер блэкджек
 		p.AddLoss()
 		h.savePlayer(p)
 		h.sendWithKeyboard(chatID,
 			fmt.Sprintf("🎴 Вы: %v (%d)\n🃏 Дилер: %v\n\n🎰 BLACKJACK у дилера!\n💵 Баланс: %d",
-				g.PlayerCards, g.PlayerScore(), g.DealerCards, p.Balance),
+				hand.Cards, hand.Score(), g.DealerCards, p.Balance),
 			EndGameKeyboard(p.LastBet))
 		return
 	}
 
 	h.savePlayer(p)
-	canDouble := p.CanAfford(bet)
 
+	opts := h.getKeyboardOptions(g, p)
 	h.sendWithKeyboard(chatID,
 		fmt.Sprintf("💰 Ставка: %d | Баланс: %d\n\n%s",
-			bet, p.Balance, formatGameStatus(g, false)),
-		GameKeyboard(canDouble))
+			bet, p.Balance, h.formatGameStatus(g, false)),
+		GameKeyboard(opts))
 }
 
 // ============== ОБРАБОТЧИКИ CALLBACK ==============
@@ -275,6 +326,8 @@ func (h *Handler) HandleCallback(callback *tgbotapi.CallbackQuery) {
 		h.handleStand(chatID, g, p)
 	case CallbackDouble:
 		h.handleDouble(chatID, g, p)
+	case CallbackSplit:
+		h.handleSplit(chatID, g, p)
 	}
 
 	h.answerCallback(callback.ID, "")
@@ -282,92 +335,148 @@ func (h *Handler) HandleCallback(callback *tgbotapi.CallbackQuery) {
 
 func (h *Handler) handleHit(chatID int64, g *game.State, p *player.Player) {
 	g.Hit()
+	hand := g.Current()
 
-	if game.IsBust(g.PlayerCards) {
-		g.IsActive = false
-		p.AddLoss()
-		h.savePlayer(p)
-
-		h.sendWithKeyboard(chatID,
-			fmt.Sprintf("🎴 Вы: %v (%d)\n\n💥 Перебор!\n💵 Баланс: %d",
-				g.PlayerCards, g.PlayerScore(), p.Balance),
-			EndGameKeyboard(p.LastBet))
+	if hand.IsBust {
+		// Переход к следующей руке или завершение
+		if g.NextHand() {
+			// Есть ещё руки
+			opts := h.getKeyboardOptions(g, p)
+			h.sendWithKeyboard(chatID,
+				fmt.Sprintf("💥 Перебор на руке %d!\n\n%s",
+					g.CurrentHand, h.formatGameStatus(g, false)),
+				GameKeyboard(opts))
+		} else {
+			// Все руки сыграны
+			h.finishGame(chatID, g, p)
+		}
 		return
 	}
 
-	h.sendWithKeyboard(chatID, formatGameStatus(g, false), GameKeyboard(false))
+	opts := h.getKeyboardOptions(g, p)
+	h.sendWithKeyboard(chatID, h.formatGameStatus(g, false), GameKeyboard(opts))
 }
 
 func (h *Handler) handleStand(chatID int64, g *game.State, p *player.Player) {
-	result := g.Finish()
-	var resultText string
-	var winAmount int
+	g.Stand()
 
-	switch result {
-	case game.ResultPlayerWin:
-		resultText = "🎉 Вы выиграли!"
-		winAmount = g.Bet * 2
-		p.AddWin(winAmount)
-	case game.ResultDealerWin:
-		resultText = "😔 Дилер выиграл!"
-		p.AddLoss()
-	case game.ResultPush:
-		resultText = "🤝 Ничья!"
-		p.AddDraw(g.Bet)
+	if g.NextHand() {
+		// Переход к следующей руке
+		opts := h.getKeyboardOptions(g, p)
+		h.sendWithKeyboard(chatID,
+			fmt.Sprintf("✋ Стоим. Переход к руке %d\n\n%s",
+				g.CurrentHand+1, h.formatGameStatus(g, false)),
+			GameKeyboard(opts))
+	} else {
+		h.finishGame(chatID, g, p)
 	}
-
-	h.savePlayer(p)
-	h.sendWithKeyboard(chatID,
-		formatGameEnd(g, p, resultText, winAmount),
-		EndGameKeyboard(p.LastBet))
 }
 
 func (h *Handler) handleDouble(chatID int64, g *game.State, p *player.Player) {
-	if !g.CanDouble {
+	hand := g.Current()
+	if hand == nil || !hand.CanDouble() {
 		return
 	}
 
-	if !p.CanAfford(g.Bet) {
+	if !p.CanAfford(hand.Bet) {
 		h.send(chatID, "❌ Недостаточно средств для удвоения")
 		return
 	}
 
-	p.Balance -= g.Bet
+	p.Balance -= hand.Bet
 	g.Double()
 
-	if game.IsBust(g.PlayerCards) {
-		g.IsActive = false
-		p.AddLoss()
-		h.savePlayer(p)
-
+	if g.NextHand() {
+		status := "✋"
+		if hand.IsBust {
+			status = "💥"
+		}
+		opts := h.getKeyboardOptions(g, p)
 		h.sendWithKeyboard(chatID,
-			fmt.Sprintf("💰 Удвоено: %d\n\n🎴 Вы: %v (%d)\n\n💥 Перебор!\n💵 Баланс: %d",
-				g.Bet, g.PlayerCards, g.PlayerScore(), p.Balance),
-			EndGameKeyboard(p.LastBet))
+			fmt.Sprintf("💰 Удвоено! %s Переход к руке %d\n\n%s",
+				status, g.CurrentHand+1, h.formatGameStatus(g, false)),
+			GameKeyboard(opts))
+	} else {
+		h.finishGame(chatID, g, p)
+	}
+}
+
+func (h *Handler) handleSplit(chatID int64, g *game.State, p *player.Player) {
+	hand := g.Current()
+	if hand == nil || !hand.CanSplit() {
 		return
 	}
 
-	result := g.Finish()
-	var resultText string
-	var winAmount int
-
-	switch result {
-	case game.ResultPlayerWin:
-		resultText = "🎉 Вы выиграли!"
-		winAmount = g.Bet * 2
-		p.AddWin(winAmount)
-	case game.ResultDealerWin:
-		resultText = "😔 Дилер выиграл!"
-		p.AddLoss()
-	case game.ResultPush:
-		resultText = "🤝 Ничья!"
-		p.AddDraw(g.Bet)
+	if !p.CanAfford(hand.Bet) {
+		h.send(chatID, "❌ Недостаточно средств для сплита")
+		return
 	}
 
+	// Списываем ставку для новой руки
+	p.Balance -= hand.Bet
 	h.savePlayer(p)
+
+	g.Split()
+
+	// Если сплит тузов — сразу завершаем
+	if hand.SplitAces {
+		h.send(chatID, "✂️ Сплит тузов! По одной карте на каждую руку.")
+		h.finishGame(chatID, g, p)
+		return
+	}
+
+	opts := h.getKeyboardOptions(g, p)
 	h.sendWithKeyboard(chatID,
-		fmt.Sprintf("💰 Удвоено: %d\n\n%s", g.Bet, formatGameEnd(g, p, resultText, winAmount)),
-		EndGameKeyboard(p.LastBet))
+		fmt.Sprintf("✂️ Сплит! Теперь у вас %d руки.\n💰 Общая ставка: %d | Баланс: %d\n\n%s",
+			len(g.Hands), g.TotalBet(), p.Balance, h.formatGameStatus(g, false)),
+		GameKeyboard(opts))
+}
+
+func (h *Handler) finishGame(chatID int64, g *game.State, p *player.Player) {
+	g.Finish()
+
+	var results []string
+	totalWin := 0
+	wins := 0
+	losses := 0
+	draws := 0
+
+	for _, hand := range g.Hands {
+		result, winAmount := g.HandResult(hand)
+
+		switch result {
+		case game.ResultPlayerWin:
+			results = append(results, "🎉 Победа!")
+			totalWin += winAmount
+			wins++
+		case game.ResultDealerWin:
+			results = append(results, "😔 Проигрыш")
+			losses++
+		case game.ResultPush:
+			results = append(results, "🤝 Ничья")
+			totalWin += winAmount
+			draws++
+		}
+	}
+
+	// Обновляем баланс и статистику
+	p.Balance += totalWin
+
+	// Считаем как одну игру, но записываем все победы/поражения
+	if wins > losses {
+		p.Wins++
+	} else if losses > wins {
+		p.Losses++
+	} else {
+		p.Draws++
+	}
+	p.Games++
+
+	h.savePlayer(p)
+
+	h.sendWithKeyboard(chatID,
+		h.formatGameEnd(g, p, results, totalWin),
+		EndGameKeyboard(g.InitialBet))
 }
 
 // ============== ОБРАБОТЧИК СООБЩЕНИЙ ==============
